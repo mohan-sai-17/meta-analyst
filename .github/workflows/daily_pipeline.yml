@@ -1,0 +1,49 @@
+name: Daily Pipeline (manual fallback)
+
+# !! SCHEDULING MOVED TO AWS !!
+# The daily pipeline now runs entirely inside AWS:
+#   EventBridge Scheduler (cron weekdays 14:00 UTC)
+#     → Step Functions state machine "meta-analyst-pipeline-prod"
+#       → meta-analyst-pipeline Lambda (9 steps via handler.py)
+#
+# This workflow is a manual emergency fallback only.
+# Use it to re-trigger the pipeline if the AWS schedule fails or
+# if you need to run it on a non-scheduled day.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  trigger-pipeline:
+    name: Trigger Step Functions pipeline
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Start Step Functions execution
+        run: |
+          SM_ARN=$(aws stepfunctions list-state-machines \
+            --query "stateMachines[?name=='meta-analyst-pipeline-prod'].stateMachineArn" \
+            --output text --region us-east-1)
+
+          if [ -z "$SM_ARN" ]; then
+            echo "ERROR: Could not find state machine 'meta-analyst-pipeline-prod'"
+            exit 1
+          fi
+
+          EXEC_ARN=$(aws stepfunctions start-execution \
+            --state-machine-arn "$SM_ARN" \
+            --name "manual-$(date +%Y%m%d-%H%M%S)" \
+            --query executionArn --output text)
+
+          echo "  [TRIGGERED] Execution started: $EXEC_ARN"
+          echo "  Monitor at: https://console.aws.amazon.com/states/home#/executions/details/$EXEC_ARN"

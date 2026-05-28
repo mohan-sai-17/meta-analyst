@@ -1,0 +1,48 @@
+name: Terraform Plan (review only)
+
+# This workflow runs terraform plan for review purposes only.
+# It does NOT apply changes — run terraform apply locally.
+#
+# Reason: Terraform state is stored locally (not in S3/Terraform Cloud).
+# GitHub Actions has no access to the local state file, so terraform apply
+# from CI would try to recreate existing resources and fail.
+#
+# To apply infrastructure changes:
+#   cd cloud/terraform
+#   terraform apply -var-file=environments/account_a.tfvars
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init
+        working-directory: cloud/terraform
+        run: terraform init
+
+      - name: Terraform Plan
+        working-directory: cloud/terraform
+        run: |
+          terraform plan \
+            -var-file=environments/account_a.tfvars \
+            -no-color

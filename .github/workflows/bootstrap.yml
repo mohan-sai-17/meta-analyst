@@ -1,0 +1,49 @@
+name: Bootstrap (one-time setup)
+
+# Run this ONCE before the first terraform apply.
+# Builds and pushes the pipeline Docker image to ECR, and uploads
+# billing_check.zip to S3, so Terraform can create the Lambda functions.
+# After terraform apply succeeds, use the normal Deploy workflow for all future deploys.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  bootstrap:
+    name: Build and push pipeline image + billing_check zip
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push pipeline Docker image
+        env:
+          LATEST: ${{ steps.ecr.outputs.registry }}/meta-analyst-api:pipeline-latest
+        run: |
+          docker build -t "$LATEST" -f cloud/pipeline/Dockerfile cloud/
+          docker push "$LATEST"
+          echo "  [PUSH] $LATEST"
+
+      - name: Build and upload billing_check.zip to S3
+        run: |
+          mkdir -p billing_package
+          cp cloud/pipeline/billing_check.py billing_package/
+          cd billing_package && zip -r9 ../billing_check.zip . && cd ..
+          aws s3 cp billing_check.zip \
+            s3://${{ secrets.BUCKET_NAME }}/lambda/billing_check.zip --no-progress
+          echo "  [UPLOAD] billing_check.zip uploaded"

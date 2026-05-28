@@ -1,0 +1,42 @@
+name: Billing Check (manual fallback)
+
+# !! SCHEDULING MOVED TO AWS !!
+# The billing check now runs inside AWS:
+#   EventBridge Scheduler (daily 09:00 UTC)
+#     → meta-analyst-billing-check Lambda
+#       → publishes SNS alert at 15 / 10 / 5 / 1 days before credit expiry
+#
+# This workflow is a manual emergency fallback only.
+# Use it to immediately check remaining credits if you suspect an issue.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  trigger-billing-check:
+    name: Invoke billing-check Lambda
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Invoke billing-check Lambda
+        run: |
+          aws lambda invoke \
+            --function-name meta-analyst-billing-check \
+            --region us-east-1 \
+            --log-type Tail \
+            --query LogResult \
+            --output text \
+            /tmp/billing_response.json | base64 --decode
+
+          echo "--- Lambda response ---"
+          cat /tmp/billing_response.json

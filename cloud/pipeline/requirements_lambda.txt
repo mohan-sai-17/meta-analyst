@@ -1,0 +1,13 @@
+# Pipeline Lambda dependencies
+# ---------------------------------------------------------------
+# Pinned to versions with pre-built manylinux wheels so the Docker
+# build doesn't need a C compiler (Lambda base image has none).
+# numpy pinned to 1.x — numpy 2.x uses meson and requires gcc.
+# ---------------------------------------------------------------
+
+numpy==1.26.4
+pandas==2.2.3
+pyarrow==14.0.2
+duckdb==1.1.3
+yfinance>=0.2.50
+requests>=2.31

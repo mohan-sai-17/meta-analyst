@@ -1,0 +1,246 @@
+name: Deploy
+
+# Three sequential jobs:
+#   deploy-pipeline : build pipeline Lambda zip → S3 → Lambda (if cloud/pipeline/** or cloud/sql/** changed)
+#   deploy-api      : build Docker image → ECR → API Lambda  (if cloud/api/** changed)
+#   deploy-frontend : build Next.js → Cloudflare Pages       (always runs after the above two)
+#
+# Smart skip logic inside each job avoids wasted rebuilds when files haven't changed.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'cloud/api/**'
+      - 'cloud/pipeline/**'
+      - 'cloud/sql/**'
+      - 'cloud/frontend/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  # ============================================================================
+  # JOB 1 — Pipeline Lambda → ECR image → Lambda
+  # ============================================================================
+  # Builds a Docker image for the pipeline Lambda (no zip size limit).
+  # Billing-check is still a tiny zip (stdlib + boto3 only).
+  deploy-pipeline:
+    name: Pipeline Lambda → ECR → Lambda
+    runs-on: ubuntu-latest
+    outputs:
+      deployed: ${{ steps.build.outputs.deployed }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check if pipeline files changed
+        id: check
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+          elif git diff --name-only HEAD~1 HEAD | grep -qE '^cloud/(pipeline|sql)/'; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "  [SKIP] No cloud/pipeline/** or cloud/sql/** changes — skipping pipeline deploy."
+          fi
+
+      - name: Configure AWS credentials (OIDC)
+        if: steps.check.outputs.changed == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Log in to ECR
+        if: steps.check.outputs.changed == 'true'
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push pipeline Docker image
+        if: steps.check.outputs.changed == 'true'
+        id: build
+        env:
+          IMAGE: ${{ steps.ecr.outputs.registry }}/meta-analyst-api:pipeline-${{ github.sha }}
+          LATEST: ${{ steps.ecr.outputs.registry }}/meta-analyst-api:pipeline-latest
+        run: |
+          docker build -t "$IMAGE" -t "$LATEST" -f cloud/pipeline/Dockerfile cloud/
+          docker push "$IMAGE"
+          docker push "$LATEST"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+          echo "deployed=true" >> $GITHUB_OUTPUT
+
+      - name: Update pipeline Lambda function code
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          aws lambda update-function-code \
+            --function-name meta-analyst-pipeline \
+            --image-uri "$IMAGE"
+          aws lambda wait function-updated --function-name meta-analyst-pipeline
+          echo "  [DEPLOY] meta-analyst-pipeline updated."
+
+      - name: Update billing-check Lambda function code
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          mkdir -p billing_package
+          cp cloud/pipeline/billing_check.py billing_package/
+          cd billing_package && zip -r9 ../billing_check.zip . && cd ..
+
+          aws s3 cp billing_check.zip \
+            s3://${{ secrets.BUCKET_NAME }}/lambda/billing_check.zip \
+            --no-progress
+
+          aws lambda update-function-code \
+            --function-name meta-analyst-billing-check \
+            --s3-bucket ${{ secrets.BUCKET_NAME }} \
+            --s3-key lambda/billing_check.zip
+          aws lambda wait function-updated --function-name meta-analyst-billing-check
+          echo "  [DEPLOY] meta-analyst-billing-check updated."
+
+  # ============================================================================
+  # JOB 2 — API → ECR → Lambda
+  # ============================================================================
+  deploy-api:
+    name: API → ECR → Lambda
+    runs-on: ubuntu-latest
+    outputs:
+      deployed: ${{ steps.build.outputs.deployed }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check if API files changed
+        id: check
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+          elif git diff --name-only HEAD~1 HEAD | grep -q '^cloud/api/'; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "  [SKIP] No cloud/api/** changes — skipping Lambda deploy."
+          fi
+
+      - name: Configure AWS credentials (OIDC)
+        if: steps.check.outputs.changed == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Log in to ECR
+        if: steps.check.outputs.changed == 'true'
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push Docker image
+        if: steps.check.outputs.changed == 'true'
+        id: build
+        env:
+          IMAGE: ${{ steps.ecr.outputs.registry }}/meta-analyst-api:${{ github.sha }}
+          LATEST: ${{ steps.ecr.outputs.registry }}/meta-analyst-api:latest
+        run: |
+          docker build -t "$IMAGE" -t "$LATEST" cloud/api/
+          docker push "$IMAGE"
+          docker push "$LATEST"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+          echo "deployed=true" >> $GITHUB_OUTPUT
+
+      - name: Update Lambda function code
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          aws lambda update-function-code \
+            --function-name meta-analyst-api \
+            --image-uri "$IMAGE"
+          aws lambda wait function-updated --function-name meta-analyst-api
+
+      - name: Smoke-test API
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          URL=$(aws lambda get-function-url-config \
+            --function-name meta-analyst-api \
+            --query FunctionUrl --output text)
+          echo "API: $URL"
+          for i in $(seq 1 5); do
+            STATUS=$(curl -s -o /tmp/resp.json -w "%{http_code}" "${URL}health")
+            echo "Attempt $i — HTTP $STATUS: $(cat /tmp/resp.json)"
+            [ "$STATUS" = "200" ] && break
+            sleep 10
+          done
+          [ "$STATUS" = "200" ] || (echo "Smoke test failed" && exit 1)
+
+  # ============================================================================
+  # JOB 3 — Frontend → Cloudflare Pages
+  # Always runs AFTER both pipeline and API jobs (success OR skipped).
+  # ============================================================================
+  deploy-frontend:
+    name: Frontend → Cloudflare Pages
+    runs-on: ubuntu-latest
+    needs: [deploy-pipeline, deploy-api]
+    # Run unless either upstream job explicitly failed
+    if: always() && needs.deploy-pipeline.result != 'failure' && needs.deploy-api.result != 'failure'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check if frontend should deploy
+        id: check
+        run: |
+          API_DEPLOYED="${{ needs.deploy-api.outputs.deployed }}"
+          EVENT="${{ github.event_name }}"
+          FE_CHANGED=$(git diff --name-only HEAD~1 HEAD | grep -qE '^cloud/frontend/' && echo true || echo false)
+
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            echo "deploy=true" >> $GITHUB_OUTPUT
+            echo "  [DEPLOY] workflow_dispatch — deploying frontend."
+          elif [ "$FE_CHANGED" = "true" ]; then
+            echo "deploy=true" >> $GITHUB_OUTPUT
+            echo "  [DEPLOY] cloud/frontend/** changed."
+          elif [ "$API_DEPLOYED" = "true" ]; then
+            echo "deploy=true" >> $GITHUB_OUTPUT
+            echo "  [DEPLOY] API was redeployed — frontend must rebuild to pick up new endpoints."
+          else
+            echo "deploy=false" >> $GITHUB_OUTPUT
+            echo "  [SKIP] No frontend or API changes."
+          fi
+
+      - name: Set up Node.js
+        if: steps.check.outputs.deploy == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: cloud/frontend/package-lock.json
+
+      - name: Install dependencies
+        if: steps.check.outputs.deploy == 'true'
+        working-directory: cloud/frontend
+        run: npm ci
+
+      - name: Build (static export)
+        if: steps.check.outputs.deploy == 'true'
+        working-directory: cloud/frontend
+        env:
+          NEXT_PUBLIC_API_URL: ${{ secrets.NEXT_PUBLIC_API_URL }}
+        run: npm run build
+
+      - name: Deploy to Cloudflare Pages
+        if: steps.check.outputs.deploy == 'true'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy cloud/frontend/out --project-name=meta-analyst --commit-dirty=true

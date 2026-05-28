@@ -1,0 +1,71 @@
+# ── Node / Next.js (cloud/frontend/) ─────────────────────────────────────────
+cloud/frontend/node_modules/
+cloud/frontend/.next/
+cloud/frontend/out/
+cloud/frontend/build/
+cloud/frontend/coverage/
+cloud/frontend/.pnp
+cloud/frontend/.pnp.*
+cloud/frontend/.yarn/*
+!cloud/frontend/.yarn/patches
+!cloud/frontend/.yarn/plugins
+!cloud/frontend/.yarn/releases
+!cloud/frontend/.yarn/versions
+cloud/frontend/*.tsbuildinfo
+cloud/frontend/next-env.d.ts
+cloud/frontend/.vercel
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+
+# ── Environment / secrets ─────────────────────────────────────────────────────
+.env
+.env.local
+.env*.local
+*.pem
+
+# ── Terraform state & secrets ─────────────────────────────────────────────────
+**/.terraform/
+**/terraform.tfstate
+**/terraform.tfstate.backup
+**/tfplan
+*.tfvars
+*.tfvars.backup
+
+# ── Logs & debug ──────────────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+*.txt.bak
+output.txt
+failed_downloads.txt
+
+# ── SEC filing downloads (large scraped data) ─────────────────────────────────
+sec_data/
+temp_sec_filings/
+
+# ── Windows ───────────────────────────────────────────────────────────────────
+Thumbs.db
+Desktop.ini
+
+# ── macOS ─────────────────────────────────────────────────────────────────────
+.DS_Store
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
+.idea/
+*.swp
+
+# ── Claude Code local settings ────────────────────────────────────────────────
+.claude/
